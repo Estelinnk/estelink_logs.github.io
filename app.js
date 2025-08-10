@@ -1,7 +1,7 @@
 // =====================
 // CONFIGURATION
 // =====================
-const API_URL = "https://MON-API-URL"; // <-- Mets l'URL publique de ton backend (ex: https://fivem-logs-api.onrender.com)
+const API_URL = "https://fivem-logs-api.onrender.com/"; // <-- Mets l'URL publique de ton backend (ex: https://fivem-logs-api.onrender.com)
 
 let filters = {};
 let liveMode = false;
@@ -175,3 +175,4 @@ function toggleLive() {
     clearInterval(liveInterval);
   }
 }
+
