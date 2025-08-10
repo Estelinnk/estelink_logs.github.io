@@ -1,179 +1,169 @@
 // =====================
-// CONFIGURATION
+// CONFIG
 // =====================
-const API_URL = "https://fivem-logs-api.onrender.com"; // <-- Mets l'URL publique de ton backend (ex: https://fivem-logs-api.onrender.com)
-
-let filters = {};
-let liveMode = false;
-let liveInterval = null;
+const RAW_API_URL = "https://fivem-logs-api.onrender.com"; // <-- mets ton URL si différente
+const API_URL = RAW_API_URL.replace(/\/+$/, "");            // normalise (retire slash final)
+const REFRESH_MS = 5000; // si tu actives un mode live plus tard
 
 // =====================
-// INITIALISATION
+// STATE + DOM
 // =====================
-document.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("search").addEventListener("input", updateFilters);
-  document.getElementById("date").addEventListener("change", updateFilters);
-  document.getElementById("type").addEventListener("change", updateFilters);
+let filters = {}; // { q, date, type, identifier, victim, weapon, minAmount, maxAmount, cursor, limit }
+const $ = s => document.querySelector(s);
 
-  document.getElementById("reset").addEventListener("click", resetFilters);
-  document.getElementById("exportCsv").addEventListener("click", exportCSV);
-  document.getElementById("liveToggle").addEventListener("click", toggleLive);
+const elError = $("#errorBanner");
+const elApiUrlText = $("#apiUrlText");
+const elApiLed = $("#apiLed");
+const elList = $("#list");
 
-  document.getElementById("openFilters").addEventListener("click", () => {
-    document.getElementById("filtersModal").showModal();
-  });
-  document.getElementById("closeFilters").addEventListener("click", () => {
-    document.getElementById("filtersModal").close();
-  });
-  document.getElementById("applyFilters").addEventListener("click", applyAdvancedFilters);
-  document.getElementById("clearFilters").addEventListener("click", clearAdvancedFilters);
+// Inputs
+const elSearch = $("#search");
+const elDate = $("#date");
+const elType = $("#type");
+const elOpenFilters = $("#openFilters");
+const elFilters = $("#filtersModal");
+const elCloseFilters = $("#closeFilters");
+const elApply = $("#applyFilters");
+const elClear = $("#clearFilters");
 
-  loadData();
-  loadStats();
-});
+// (KPIs gardés pour compat si tu veux les réafficher)
+const kpiConnect = $("#kpiConnect");
+const kpiKill = $("#kpiKill");
+const kpiTransfer = $("#kpiTransfer");
+const kpiAmount = $("#kpiAmount");
 
 // =====================
-// FONCTIONS
+// UTILS RENDER
 // =====================
-function updateFilters() {
-  filters.q = document.getElementById("search").value || undefined;
-  filters.date = document.getElementById("date").value || undefined;
-  filters.type = document.getElementById("type").value || undefined;
-  renderChips();
-  loadData();
-  loadStats();
-}
+function safeJson(v){ if(!v) return null; if(typeof v === "object") return v; try{ return JSON.parse(v); }catch{ return null; } }
+function fmtId(id){ return id ? `[${id}]` : ``; }
+function fmtAmount(a){ if(a==null) return ``; const n=Number(a)||0; return `${n.toLocaleString("fr-FR")} $`; }
 
-function resetFilters() {
-  filters = {};
-  document.getElementById("search").value = "";
-  document.getElementById("date").value = "";
-  document.getElementById("type").value = "";
-  clearAdvancedFilters();
-  renderChips();
-  loadData();
-  loadStats();
-}
-
-function applyAdvancedFilters() {
-  filters.identifier = document.getElementById("identifier").value || undefined;
-  filters.victim = document.getElementById("victim").value || undefined;
-  filters.weapon = document.getElementById("weapon").value || undefined;
-  filters.minAmount = document.getElementById("minAmount").value || undefined;
-  filters.maxAmount = document.getElementById("maxAmount").value || undefined;
-  document.getElementById("filtersModal").close();
-  renderChips();
-  loadData();
-  loadStats();
-}
-
-function clearAdvancedFilters() {
-  ["identifier", "victim", "weapon", "minAmount", "maxAmount"].forEach(id => {
-    document.getElementById(id).value = "";
-  });
-  filters.identifier = undefined;
-  filters.victim = undefined;
-  filters.weapon = undefined;
-  filters.minAmount = undefined;
-  filters.maxAmount = undefined;
-}
-
-function renderChips() {
-  const chipsContainer = document.getElementById("chips");
-  chipsContainer.innerHTML = "";
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value) {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      chip.innerHTML = `${key}: ${value} ✖`;
-      chip.onclick = () => {
-        delete filters[key];
-        document.getElementById(key)?.value && (document.getElementById(key).value = "");
-        renderChips();
-        loadData();
-        loadStats();
-      };
-      chipsContainer.appendChild(chip);
+function renderLine(log){
+  const d = safeJson(log.details);
+  switch(log.type){
+    case "kill":
+      return `${log.player_name} ${fmtId(log.identifier)} a tué ${log.victim_name||"???"} ${fmtId(log.victim_identifier)} avec ${log.weapon||"[TYPE D’ARME]"}.`;
+    case "stash": {
+      const item = d?.item || "[OBJET]";
+      const veh  = d?.vehicle_id || "[ID-VÉHICULE]";
+      const act  = (d?.action === "withdraw") ? "retiré" : "mis";
+      return `${log.player_name} ${fmtId(log.identifier)} a ${act} ${item} dans un coffre de voiture ${veh}.`;
     }
-  });
+    case "transfer": {
+      const from = d?.account_from || "[ID-COMPTE-BANCAIRE]";
+      const to   = d?.account_to   || "[ID-COMPTE-BANCAIRE]";
+      return `${log.player_name} ${fmtId(log.identifier)} a transféré ${fmtAmount(log.amount)} depuis son compte ${from} au compte personnel ${to} de ${log.target_name||"???"} ${fmtId(log.target_identifier)}.`;
+    }
+    case "connect":
+      return `${log.player_name} ${fmtId(log.identifier)} s’est connecté.`;
+    case "disconnect":
+      return `${log.player_name} ${fmtId(log.identifier)} s’est déconnecté.`;
+    default:
+      return `${log.type} — ${log.player_name}`;
+  }
 }
 
-async function loadData() {
-  try {
-    document.getElementById("errorBanner").style.display = "none";
-    const params = new URLSearchParams(filters);
-    const res = await fetch(`${API_URL}/logs?${params.toString()}`);
-    if (!res.ok) throw new Error("API error");
+function setApiStatus(ok){
+  elApiLed && (elApiLed.style.background = ok ? "#79e079" : "#ff6b6b");
+  elError.style.display = ok ? "none" : "block";
+  elApiUrlText.textContent = API_URL || "";
+}
+
+// =====================
+// FETCH
+// =====================
+async function loadData(){
+  try{
+    const qs = new URLSearchParams();
+    Object.entries(filters).forEach(([k,v]) => { if(v!=null && v!=="") qs.set(k,v); });
+
+    const res = await fetch(`${API_URL}/logs?` + qs.toString(), { mode: "cors" });
+    if(!res.ok) throw new Error(`API error ${res.status}`);
     const { data } = await res.json();
 
-    const list = document.getElementById("list");
-    list.innerHTML = "";
-    data.forEach(log => {
+    // render list
+    elList.innerHTML = "";
+    data.forEach(log=>{
       const item = document.createElement("div");
-      item.className = "list-item";
+      item.className = "item";
       item.innerHTML = `
-        <div>
-          <strong>${log.type}</strong> — ${log.player_name}
-          ${log.victim_name ? ` → ${log.victim_name}` : ""}
-          ${log.amount ? ` — $${log.amount}` : ""}
-        </div>
-        <div class="date">${new Date(log.created_at).toLocaleString()}</div>
+        <div class="time">${new Date(log.created_at).toLocaleString("fr-FR")}</div>
+        <div class="msg">${renderLine(log)}</div>
       `;
-      list.appendChild(item);
+      elList.appendChild(item);
     });
 
-    document.getElementById("apiLed").style.background = "#4caf50";
-  } catch (err) {
-    console.error(err);
-    document.getElementById("errorBanner").style.display = "block";
-    document.getElementById("apiLed").style.background = "#f44336";
+    setApiStatus(true);
+  }catch(err){
+    console.error("loadData:", err);
+    setApiStatus(false);
   }
 }
 
-async function loadStats() {
-  try {
-    const res = await fetch(`${API_URL}/stats?hours=24`);
-    if (!res.ok) throw new Error("API error");
-    const stats = await res.json();
-    document.getElementById("kpiConnect").textContent = stats.connects || 0;
-    document.getElementById("kpiKill").textContent = stats.kills || 0;
-    document.getElementById("kpiTransfer").textContent = stats.transfers || 0;
-    document.getElementById("kpiAmount").textContent = `$${stats.amount_sum || 0}`;
-  } catch (err) {
-    console.error(err);
+async function loadStats(){
+  try{
+    const res = await fetch(`${API_URL}/stats?hours=24`, { mode:"cors" });
+    if(!res.ok) throw new Error(`API error ${res.status}`);
+    const s = await res.json();
+    if(kpiConnect)  kpiConnect.textContent  = s.connects   ?? 0;
+    if(kpiKill)     kpiKill.textContent     = s.kills      ?? 0;
+    if(kpiTransfer) kpiTransfer.textContent = s.transfers  ?? 0;
+    if(kpiAmount)   kpiAmount.textContent   = (s.amount_sum ?? 0).toLocaleString("fr-FR") + " $";
+  }catch(err){
+    console.warn("loadStats:", err);
   }
 }
 
-function exportCSV() {
-  const params = new URLSearchParams(filters);
-  fetch(`${API_URL}/logs?${params.toString()}`)
-    .then(res => res.json())
-    .then(({ data }) => {
-      let csv = "Type,Player,Victim,Amount,Date\n";
-      data.forEach(log => {
-        csv += `${log.type},${log.player_name || ""},${log.victim_name || ""},${log.amount || 0},${log.created_at}\n`;
-      });
-      const blob = new Blob([csv], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "logs.csv";
-      a.click();
-      URL.revokeObjectURL(url);
-    });
+// =====================
+// FILTERS
+// =====================
+function refresh(){
+  loadData();
+  loadStats();
 }
 
-function toggleLive() {
-  liveMode = !liveMode;
-  document.getElementById("liveToggle").textContent = `Live: ${liveMode ? "ON" : "OFF"}`;
-  if (liveMode) {
-    liveInterval = setInterval(() => {
-      loadData();
-      loadStats();
-    }, 5000);
-  } else {
-    clearInterval(liveInterval);
-  }
+function applyBasics(){
+  filters.q = elSearch.value || undefined;
+  filters.date = elDate.value || undefined;
+  filters.type = elType.value || undefined;
 }
 
+function applyAdvanced(){
+  filters.identifier = ($("#identifier")?.value) || undefined;
+  filters.victim     = ($("#victim")?.value)     || undefined;
+  filters.weapon     = ($("#weapon")?.value)     || undefined;
+  filters.minAmount  = ($("#minAmount")?.value)  || undefined;
+  filters.maxAmount  = ($("#maxAmount")?.value)  || undefined;
+}
 
+function clearAdvanced(){
+  ["identifier","victim","weapon","minAmount","maxAmount"].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.value = "";
+  });
+  filters.identifier = filters.victim = filters.weapon = filters.minAmount = filters.maxAmount = undefined;
+}
+
+// =====================
+// EVENTS
+// =====================
+document.addEventListener("DOMContentLoaded", ()=>{
+  // init banner
+  elApiUrlText.textContent = API_URL;
+
+  // basics
+  elSearch.addEventListener("input", ()=>{ applyBasics(); refresh(); });
+  elDate.addEventListener("change", ()=>{ applyBasics(); refresh(); });
+  elType.addEventListener("change", ()=>{ applyBasics(); refresh(); });
+
+  // modal
+  elOpenFilters.addEventListener("click", ()=> elFilters.showModal());
+  elCloseFilters.addEventListener("click", ()=> elFilters.close());
+  elApply.addEventListener("click", ()=>{ applyAdvanced(); elFilters.close(); refresh(); });
+  elClear.addEventListener("click", ()=>{ clearAdvanced(); });
+
+  // first load
+  applyBasics();
+  refresh();
+});
